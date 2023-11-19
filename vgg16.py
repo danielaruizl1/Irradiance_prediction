@@ -3,6 +3,7 @@
 from sklearn.model_selection import train_test_split
 import torchvision.transforms as transforms
 from torch.utils.data import TensorDataset
+from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 import torchvision.models as models
@@ -75,6 +76,7 @@ wandb.init(
     config=args_dict
 )
 
+#%%%
 # Divide datasets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.3, random_state=42)

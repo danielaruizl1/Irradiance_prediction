@@ -1,2 +1,4 @@
 dataset/
 checkpoints/
+wandb/
+processed_images/

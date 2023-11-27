@@ -25,28 +25,34 @@ import os
 # Add an argument parser for hyperparameters
 str2bool = lambda x: (str(x).lower() == 'true')
 parser = argparse.ArgumentParser(description='Code for solar irradiation prediction')
-parser.add_argument('--dataset_path', type=str, default='dataset_original.xlsx')
+parser.add_argument('--dataset_path', type=str, default='dataset_forecasting_original.xlsx')
 parser.add_argument('--batch_size', type=int, default=24)
 parser.add_argument('--pretrained', type=str2bool, default=True)
 parser.add_argument('--lr', type=float, default=0.0001389)
 parser.add_argument('--gamma', type=float, default=0.9138)
 parser.add_argument('--epochs', type=int, default=15)
-parser.add_argument('--k_folds', type=int, default=5)
-parser.add_argument('--unfold_images', type=str2bool, default=False)
+parser.add_argument('--k_folds', type=int, default=4)
+parser.add_argument('--unfold_images', type=str2bool, default=True)
 parser.add_argument('--colormap', type=str2bool, default=False)
 parser.add_argument('--transforms', type=str2bool, default=False)
 parser.add_argument('--normalize_images', type=str2bool, default=True)
+parser.add_argument('--ghi1_before', type=str2bool, default=False)
+parser.add_argument('--ghi1_actual', type=str2bool, default=True)
+parser.add_argument('--image_model', type=str, default='vgg16')
 args = parser.parse_args()
 args_dict = vars(args)
 
 # path to save the processed images
-processed_images_path = os.path.join('processed_images',f'processed_unfolded_{args.unfold_images}_colormap_{args.colormap}_images_uint8.npy')
+processed_images_path = os.path.join('processed_images',f'processed_before_{args.ghi1_before}_images_uint8_forecasting.npy')
 
 # Verify if there are no processed images file
 if not os.path.isfile(processed_images_path):
 
     # Upload xlsx with the data
-    df = pd.read_excel(args.dataset_path, engine='openpyxl')
+    if args.ghi1_before:
+        df = pd.read_excel(args.dataset_path, engine='openpyxl', sheet_name="30after_30before")
+    else:
+        df = pd.read_excel(args.dataset_path, engine='openpyxl', sheet_name="30after")
     df = df.dropna()
     df = df.reset_index(drop=True)
 
@@ -88,16 +94,16 @@ if not os.path.isfile(processed_images_path):
     # Save the processed images
     np.save(processed_images_path, X_images_np)
     # Save the new dataframe
-    df.to_excel("dataset.xlsx", index=False)
+    df.to_excel(f"dataset_forecasting_before_{args.ghi1_before}.xlsx", index=False)
 
 else:
     # Load the processed images
     X_images_np = np.load(processed_images_path)
     # Loas the new dataframe
-    df = pd.read_excel("dataset.xlsx", engine='openpyxl')
+    df = pd.read_excel(f"dataset_forecasting_before_{args.ghi1_before}.xlsx", engine='openpyxl')
 
 # Define the target variable
-y = df.ghi1.values
+y = df.ghi1_30.values
 
 # Convert datetime.time to minutes
 def time_to_minutes(time_val):
@@ -108,7 +114,14 @@ def time_to_minutes(time_val):
     # Convert the datetime object to minutes
     return time_val.hour * 60 + time_val.minute
 
-X_numerical = pd.DataFrame({'hour': df['Hour'], 'temperature': df['temperature'], 'humidity': df['humidity']})
+if args.ghi1_before and args.ghi1_actual:
+    X_numerical = pd.DataFrame({'hour': df['Hour'], 'temperature': df['temperature'], 'humidity': df['humidity'], 'ghi1_30_before': df['30_ghi1'], 'ghi1_actual': df['ghi1']})
+elif args.ghi1_before and not args.ghi1_actual:
+    X_numerical = pd.DataFrame({'hour': df['Hour'], 'temperature': df['temperature'], 'humidity': df['humidity'], 'ghi1_30_before': df['30_ghi1']})
+elif not args.ghi1_before and args.ghi1_actual:
+    X_numerical = pd.DataFrame({'hour': df['Hour'], 'temperature': df['temperature'], 'humidity': df['humidity'], 'ghi1_actual': df['ghi1']})
+else:
+    X_numerical = pd.DataFrame({'hour': df['Hour'], 'temperature': df['temperature'], 'humidity': df['humidity']})
 X_numerical['hour'] = X_numerical['hour'].apply(time_to_minutes)
 
 #Normalizing the data
@@ -168,7 +181,7 @@ torch.cuda.manual_seed_all(2021)
 wandb.init(
     project='Solar Irradiation',
     config=args_dict,
-    name='colormap_images',
+    name='forecasting_sorted_vgg16',
 )
 
 # Modelo VGG16 para las imágenes
@@ -182,40 +195,89 @@ class VGG16Features(nn.Module):
         x = self.features(x)
         x = torch.flatten(x, start_dim=1)
         return x
+    
+# Modelo ResNet18 para las imágenes
+class ResNetFeatures(nn.Module):
+    def __init__(self):
+        super(ResNetFeatures, self).__init__()
+        resnet = models.resnet18(pretrained=True) 
+        self.features = nn.Sequential(*list(resnet.children())[:-1])
+
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.flatten(x, start_dim=1)
+        return x
 
 # Modelo ANN para datos numéricos
 class NumericalModel(nn.Module):
     def __init__(self):
         super(NumericalModel, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(3, 128),  
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU()
+        if (args.ghi1_before and not args.ghi1_actual) or (not args.ghi1_before and args.ghi1_actual):
+            self.fc = nn.Sequential(
+                nn.Linear(4, 128),  
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.ReLU()
+            )
+        elif args.ghi1_before and args.ghi1_actual:
+            self.fc = nn.Sequential(
+                nn.Linear(5, 128),  
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.ReLU()
+            )
+        else:
+            self.fc = nn.Sequential(
+                nn.Linear(3, 128),  
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.ReLU()
         )
 
     def forward(self, x):
         x = self.fc(x)
         return x
     
-# Modelo combinado
-class CombinedModel(nn.Module):
-    def __init__(self):
-        super(CombinedModel, self).__init__()
-        self.vgg16 = VGG16Features().to(device)
-        self.numerical = NumericalModel().to(device)
-        self.fc = nn.Sequential(
-            nn.Linear(25088 + 64, 256),  # Ajusta el tamaño según tus modelos
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
+if args.image_model == 'vgg16':
+    # Modelo combinado
+    class CombinedModel(nn.Module):
+        def __init__(self):
+            super(CombinedModel, self).__init__()
+            self.vgg16 = VGG16Features().to(device)
+            self.numerical = NumericalModel().to(device)
+            self.fc = nn.Sequential(
+                nn.Linear(25088 + 64, 256),  # Ajusta el tamaño según tus modelos
+                nn.ReLU(),
+                nn.Linear(256, 1)
+            )
 
-    def forward(self, image, numerical_data):
-        image_features = self.vgg16(image)
-        numerical_features = self.numerical(numerical_data)
-        combined = torch.cat((image_features, numerical_features), dim=1)
-        output = self.fc(combined)
-        return output
+        def forward(self, image, numerical_data):
+            image_features = self.vgg16(image)
+            numerical_features = self.numerical(numerical_data)
+            combined = torch.cat((image_features, numerical_features), dim=1)
+            output = self.fc(combined)
+            return output
+
+elif args.image_model == 'resnet18':
+
+    class CombinedModel(nn.Module):
+        def __init__(self):
+            super(CombinedModel, self).__init__()
+            self.resnet = ResNetFeatures().to(device)
+            self.numerical = NumericalModel().to(device)
+            # Ajustar el tamaño de la entrada según las características de ResNet18
+            self.fc = nn.Sequential(
+                nn.Linear(512 + 64, 256),  # Ajuste basado en las características de ResNet18
+                nn.ReLU(),
+                nn.Linear(256, 1)
+            )
+
+        def forward(self, image, numerical_data):
+            image_features = self.resnet(image)
+            numerical_features = self.numerical(numerical_data)
+            combined = torch.cat((image_features, numerical_features), dim=1)
+            output = self.fc(combined)
+            return output
 
 def calculate_metrics(preds, labels):
     mse = mean_squared_error(labels, preds)
@@ -315,7 +377,7 @@ def train_model(dataloaders, num_epochs, device, fold):
 
 # Cross validation funtion
 def cross_validation(dataset, k_folds, num_epochs, device):
-    kfold = KFold(n_splits=k_folds, shuffle=True)
+    kfold = KFold(n_splits=k_folds, shuffle=False)
     results = {'mse': [], 'rmse': [], 'mae': [], 'variance': []}
     
     # Split dataset into K folds

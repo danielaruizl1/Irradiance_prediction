@@ -9,6 +9,7 @@ from torchvision import transforms
 import matplotlib.pyplot as plt
 from datetime import datetime
 import torch.optim as optim
+from numpy import asarray
 from tqdm import tqdm
 import torch.nn as nn
 from PIL import Image
@@ -22,6 +23,7 @@ import copy
 import cv2
 import os
 
+
 # Add an argument parser for hyperparameters
 str2bool = lambda x: (str(x).lower() == 'true')
 parser = argparse.ArgumentParser(description='Code for solar irradiation prediction')
@@ -31,20 +33,85 @@ parser.add_argument('--pretrained', type=str2bool, default=True)
 parser.add_argument('--lr', type=float, default=0.0001389)
 parser.add_argument('--gamma', type=float, default=0.9138)
 parser.add_argument('--epochs', type=int, default=15)
-parser.add_argument('--k_folds', type=int, default=4)
+parser.add_argument('--k_folds', type=int, default=5)
+parser.add_argument('--normalize_images', type=str2bool, default=True)
 parser.add_argument('--unfold_images', type=str2bool, default=True)
+parser.add_argument('--shuffle_folds', type=str2bool, default=False)
 parser.add_argument('--colormap', type=str2bool, default=False)
 parser.add_argument('--transforms', type=str2bool, default=False)
-parser.add_argument('--normalize_images', type=str2bool, default=True)
 parser.add_argument('--ghi1_before', type=str2bool, default=False)
-parser.add_argument('--ghi1_actual', type=str2bool, default=True)
+parser.add_argument('--ghi1_actual', type=str2bool, default=False)
 parser.add_argument('--image_model', type=str, default='vgg16')
+parser.add_argument('--segmented', type=str2bool, default=False)
 args = parser.parse_args()
 args_dict = vars(args)
 
 # path to save the processed images
-processed_images_path = os.path.join('processed_images',f'processed_before_{args.ghi1_before}_images_uint8_forecasting.npy')
+processed_images_path = os.path.join('processed_images',f'processed_unfolded_before_{args.ghi1_before}_segmented_{args.segmented}_images_forecasting.npy')
 
+def process_jp2_images(paths):
+
+    X_images = []
+
+    # Upload the images
+    for path in tqdm(paths):
+        # Read the image
+        image = plt.imread(path)
+        # Convert to uint8
+        image = ((image / 65535.0) * 255).astype(np.uint8)
+        # Unfold the image if it is required
+        if args.unfold_images:
+            # Obtener dimensiones de la imagen
+            height, width = image.shape
+            # Convertir la imagen a coordenadas polares
+            center = (width // 2, height // 2)
+            max_radius = min(width, height) // 2
+            polar_image = cv2.warpPolar(image, (max_radius, 360), center, max_radius, cv2.WARP_POLAR_LINEAR)
+            image = cv2.rotate(polar_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # Convert to RGB or Colormap
+        if args.colormap:
+            color_image = cv2.applyColorMap(image, cv2.COLORMAP_JET)
+        else:
+            color_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        # Resize the image
+        resized_image = cv2.resize(color_image, (224,224))
+        # Transpose the image according to PyTorch standards (C, H, W)
+        transposed_image = resized_image.transpose(2,0,1)
+        X_images.append(transposed_image)
+    
+    return X_images
+
+def process_png_images(paths):
+    
+    X_images = []
+    # Upload the images
+    for path in tqdm(paths):
+        # Read the image
+        RGBAimg = Image.open(path)
+        RGBAimg = asarray(RGBAimg)
+        RGBimg = RGBAimg[:,:,0:3]
+        # Convert to uint8
+        image = (RGBimg * 255).astype(np.uint8)
+        # Unfold the image if it is required
+        if args.unfold_images:
+            # Obtener dimensiones de la imagen
+            height, width, _ = image.shape
+            # Convertir la imagen a coordenadas polares
+            center = (width // 2, height // 2)
+            max_radius = min(width, height) // 2
+            polar_image = cv2.warpPolar(image, (max_radius, 360), center, max_radius, cv2.WARP_POLAR_LINEAR)
+            image = cv2.rotate(polar_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # Convert to RGB or Colormap
+        if args.colormap:
+            image = cv2.applyColorMap(image, cv2.COLORMAP_JET)
+        # Resize the image
+        resized_image = cv2.resize(image, (224,224))
+        # Transpose the image according to PyTorch standards (C, H, W)
+        transposed_image = resized_image.transpose(2,0,1)
+        X_images.append(transposed_image)
+    
+    return X_images
+    
 # Verify if there are no processed images file
 if not os.path.isfile(processed_images_path):
 
@@ -56,39 +123,13 @@ if not os.path.isfile(processed_images_path):
     df = df.dropna()
     df = df.reset_index(drop=True)
 
-    X_images = []
-    not_founded = []
+    if args.segmented:
+        paths = df.segmented_image_path
+        X_images = process_png_images(paths)
+    else:
+        paths = df.image_path
+        X_images = process_jp2_images(paths)
 
-    # Upload the images
-    for path in tqdm(df.image_path):
-        try:
-            # Read the image
-            image = plt.imread(path)
-            # Convert to uint8
-            image = ((image / 65535.0) * 255).astype(np.uint8)
-            if args.unfold_images:
-                # Obtener dimensiones de la imagen
-                height, width = image.shape
-                # Convertir la imagen a coordenadas polares
-                center = (width // 2, height // 2)
-                max_radius = min(width, height) // 2
-                polar_image = cv2.warpPolar(image, (max_radius, 360), center, max_radius, cv2.WARP_POLAR_LINEAR)
-                image = cv2.rotate(polar_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            # Convert to RGB or Colormap
-            if args.colormap:
-                color_image = cv2.applyColorMap(image, cv2.COLORMAP_JET)
-            else:
-                color_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            # Resize the image
-            resized_image = cv2.resize(color_image, (224,224))
-            # Transpose the image according to PyTorch standards (C, H, W)
-            transposed_image = resized_image.transpose(2,0,1)
-            X_images.append(transposed_image)
-        except:
-            print(f'{path} not found')
-            not_founded.append(path)
-            df = df[df['image_path'] != path]
- 
     # Convert to numpy array
     X_images_np = np.array(X_images)
     # Save the processed images
@@ -181,7 +222,7 @@ torch.cuda.manual_seed_all(2021)
 wandb.init(
     project='Solar Irradiation',
     config=args_dict,
-    name='forecasting_sorted_vgg16',
+    name=f'forecasting_before_{args.ghi1_before}_actual_{args.ghi1_actual}_sorted_{args.image_model}_segmented_{args.segmented}_unfolded_images',
 )
 
 # Modelo VGG16 para las imágenes
@@ -377,7 +418,7 @@ def train_model(dataloaders, num_epochs, device, fold):
 
 # Cross validation funtion
 def cross_validation(dataset, k_folds, num_epochs, device):
-    kfold = KFold(n_splits=k_folds, shuffle=False)
+    kfold = KFold(n_splits=k_folds, shuffle=args.shuffle_folds)
     results = {'mse': [], 'rmse': [], 'mae': [], 'variance': []}
     
     # Split dataset into K folds

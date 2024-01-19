@@ -1,4 +1,3 @@
 dataset/
-checkpoints/
-wandb/
 processed_images/
+best_model(forecasting_before_False_actual_True_sorted_resnet18).pth
